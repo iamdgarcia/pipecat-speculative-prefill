@@ -98,9 +98,25 @@ warmer = PrefixCacheWarmer(context=context, base_url="http://localhost:8000/v1",
 | `TransformersPrefillBackend` | in-process (HF `DynamicCache`) | yes | the tested path; any causal-LM checkpoint with a chat template |
 | `PrefixCacheWarmer` | server-side prefix cache | no (cache hit instead) | any OpenAI-compatible server with prefix caching; your normal LLM service keeps tools/streaming |
 
+## Function calling
+
+`SpeculativeLLMService` supports tools in the Hermes/Qwen format (the ```<tool_call>```
+block most open small models emit: Qwen 2.5, Hermes, Nous). Tools come from
+the shared context like any pipecat LLM service (direct functions or
+`FunctionSchema`s), calls are parsed out of generation, never shown to TTS,
+and executed through the standard pipecat machinery: registered handlers,
+`FunctionCallsStartedFrame`, parallel-call grouping, and the speculation
+guard (a tool call attempted during speculative inference is withdrawn and
+re-run after the committed transcript).
+
+Tool results flow back through the context (role `tool`), and the next turn's
+prefill reuses the cache: on our E2E test (Qwen2.5-0.5B-Instruct, one tool),
+the turn after the tool call hit 81% cache reuse. Other tool-call formats
+(e.g. Llama-3.1, Mistral `[TOOL_CALLS]`) are out of scope for now.
+
 ## Honest limits
 
-- **Function calling is not supported** by `SpeculativeLLMService`: tools in the context are ignored with a warning. Use `PrefixCacheWarmer` + your regular service when you need tools.
+- Tool-call parsing covers the Hermes/Qwen format only (see above).
 - Sampling is `temperature` / `top_p` / `top_k` (settings-driven); no stop strings, no repetition penalty. EOS + `max_tokens` end generation.
 - Multimodal messages are flattened to their text parts (a text model can't prefill images).
 - A cancelled generation stops at the next token boundary; the cache stays consistent and the next sync reconciles.

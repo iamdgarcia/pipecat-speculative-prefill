@@ -53,11 +53,15 @@ class PrefillBackend(ABC):
     """
 
     @abstractmethod
-    async def tokenize_prompt(self, messages: list[dict[str, Any]]) -> list[int]:
+    async def tokenize_prompt(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+    ) -> list[int]:
         """Render `messages` with the model's chat template and tokenize.
 
         `add_generation_prompt=True`, so the returned ids end exactly where
-        generation would start.
+        generation would start. `tools` are OpenAI-format tool definitions
+        (from ``to_provider_tools_format``); templates that don't use them
+        simply ignore the extra variable.
         """
 
     @abstractmethod
@@ -192,10 +196,12 @@ class TransformersPrefillBackend(PrefillBackend):
         t = self._torch.tensor([ids])
         return t.to(self._device) if self._device else t
 
-    async def tokenize_prompt(self, messages: list[dict[str, Any]]) -> list[int]:
+    async def tokenize_prompt(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+    ) -> list[int]:
         def work() -> list[int]:
             text = self._tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False
+                messages, tools=tools, add_generation_prompt=True, tokenize=False
             )
             return list(self._tokenizer(text, add_special_tokens=False).input_ids)
 

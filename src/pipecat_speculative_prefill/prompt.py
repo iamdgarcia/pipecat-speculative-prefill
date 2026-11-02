@@ -57,7 +57,10 @@ def build_messages(
     Returns:
         Message dicts ready for the tokenizer's chat template. ``developer``
         roles are mapped to ``system`` (local chat templates don't know the
-        OpenAI developer role).
+        OpenAI developer role). Tool-calling messages pass through intact:
+        assistant messages keep their ``tool_calls`` list and tool messages
+        keep ``tool_call_id`` (chat templates that support tools expect the
+        OpenAI shapes, which is what pipecat stores).
     """
     messages: list[dict[str, Any]] = []
     if system_instruction:
@@ -66,6 +69,13 @@ def build_messages(
         role = m.get("role")
         if role == "developer":
             messages.append({"role": "system", "content": _flatten_content(m.get("content"))})
+        elif "tool_calls" in m or role == "tool":
+            # Assistant tool-call / tool-result messages: keep the OpenAI
+            # shape the template expects, flatten content only if multimodal.
+            out = dict(m)
+            if "content" in m:
+                out["content"] = _flatten_content(m.get("content"))
+            messages.append(out)
         else:
             messages.append({"role": role, "content": _flatten_content(m.get("content"))})
     if partial_user_text is not None:

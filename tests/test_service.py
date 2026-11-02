@@ -52,7 +52,8 @@ class FakeBackend(PrefillBackend):
             self.vocab[s] = 1000 + len(self.vocab)
         return self.vocab[s]
 
-    async def tokenize_prompt(self, messages: list[dict]) -> list[int]:
+    async def tokenize_prompt(self, messages: list[dict], tools=None) -> list[int]:
+        self.last_tools = tools
         ids = [self._tok("<bos>")]
         for m in messages:
             ids.append(self._tok(f"<{m['role']}>"))
@@ -165,8 +166,10 @@ class TestSpeculativePrefillFlow:
         context.add_message({"role": "user", "content": "hello wor"})
         await service.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
 
+        # The parser holds back a tail to avoid leaking an open tag, so the
+        # two pieces arrive coalesced after finalize.
         texts = [f.text for f in pushed if isinstance(f, LLMTextFrame)]
-        assert texts == ["Hi", " there"]
+        assert texts == ["Hi there"]
         kinds = [type(f) for f in pushed]
         assert kinds[0] is LLMFullResponseStartFrame
         assert kinds[-1] is LLMFullResponseEndFrame

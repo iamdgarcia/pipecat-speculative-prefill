@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -26,6 +27,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     EagerTranscriptionFrame,
     Frame,
+    FunctionCallFromLLM,
     InterimTranscriptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
@@ -39,6 +41,7 @@ from pipecat.services.settings import LLMSettings
 
 from .backends import PrefillBackend, SyncStats
 from .prompt import build_messages
+from .tools import ToolCallParser
 
 
 @dataclass
@@ -78,8 +81,11 @@ class SpeculativeLLMService(LLMService):
         settings: `LLMSettings` (system_instruction, temperature, max_tokens,
             top_p, top_k, model name for logs).
 
-    Function calling is not supported: tools advertised in the context are
-    ignored with a warning. This service is for fast plain-text voice replies.
+    Function calling is supported for the Hermes/Qwen tool-call format (the
+    ``json`` block most open small models emit). Tools come from the shared
+    context like any pipecat LLM service; calls are parsed from generation,
+    never shown to TTS, and executed through the standard pipecat machinery
+    (registered handlers, `FunctionCallsStartedFrame`, speculation guard).
     """
 
     def __init__(
@@ -187,17 +193,27 @@ class SpeculativeLLMService(LLMService):
     def _opt(self, value: Any, default: Any) -> Any:
         return default if value is None or not is_given(value) else value
 
-    async def _process_context(self, context: LLMContext) -> None:
-        if is_given(context.tools) and context.tools and not self._warned_tools:
-            self._warned_tools = True
-            logger.warning(
-                f"{self}: tools advertised but {type(self).__name__} does not support "
-                "function calling; running without tools."
-            )
+    def _tools_for(self, context: LLMContext) -> list[dict[str, Any]] | None:
+        """OpenAI-format tool definitions for the chat template, or None."""
+        if not is_given(context.tools) or not context.tools:
+            return None
+        adapter = self.get_llm_adapter()
+        if not hasattr(adapter, "to_provider_tools_format"):
+            if not self._warned_tools:
+                self._warned_tools = True
+                logger.warning(
+                    f"{self}: adapter {type(adapter).__name__} cannot format tools; "
+                    "running without tools."
+                )
+            return None
+        tools = adapter.to_provider_tools_format(context.tools)
+        return tools or None
 
+    async def _process_context(self, context: LLMContext) -> None:
         await self.start_ttfb_metrics()
         messages = build_messages(context.messages, self._system_instruction())
-        tokens = await self._backend.tokenize_prompt(messages)
+        tools = self._tools_for(context)
+        tokens = await self._backend.tokenize_prompt(messages, tools=tools)
 
         async with self._prefill_lock:
             self._generating = True
@@ -205,6 +221,7 @@ class SpeculativeLLMService(LLMService):
             start = time.perf_counter()
             stats = SyncStats(total=len(tokens), kept=0)
             first_piece = True
+            parser = ToolCallParser()
             try:
                 stats = await self._backend.sync(tokens)
                 self._turn.kept, self._turn.total = stats.kept, stats.total
@@ -220,7 +237,22 @@ class SpeculativeLLMService(LLMService):
                         self._turn.ttfb_ms = (time.perf_counter() - start) * 1000
                         await self.stop_ttfb_metrics()
                         first_piece = False
-                    await self._push_llm_text(piece)
+                    for visible in parser.feed(piece):
+                        await self._push_llm_text(visible)
+                leftover, calls = parser.finalize()
+                for visible in leftover:
+                    await self._push_llm_text(visible)
+                if calls:
+                    function_calls = [
+                        FunctionCallFromLLM(
+                            context=context,
+                            tool_call_id=f"call_{uuid.uuid4().hex[:12]}",
+                            function_name=c.name,
+                            arguments=c.arguments,
+                        )
+                        for c in calls
+                    ]
+                    await self.run_function_calls(function_calls)
                 logger.info(
                     f"{self}: spec-prefill hit {self._turn.hit_ratio:.0%} "
                     f"({self._turn.kept}/{self._turn.total} tokens), "
