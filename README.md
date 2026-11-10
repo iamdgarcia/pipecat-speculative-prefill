@@ -2,6 +2,10 @@
 
 Speculative KV-cache prefill for [pipecat](https://github.com/pipecat-ai/pipecat) voice agents.
 
+<p align="center">
+  <img src="docs/flow.svg" alt="Sequence: while the user speaks, interim transcriptions prefill the KV cache; when the final transcription arrives, generation starts from the warm cache and the first token reaches TTS in 317 ms" width="840">
+</p>
+
 **What you'll learn here (measured):** with a local model, the LLM's prefill can run *while the user is still talking*. On this dev machine (Intel corporate laptop, CPU-only, fp32, Qwen2.5-0.5B-Instruct):
 
 | Prompt | Cold TTFT | With speculative prefill | Faster |
@@ -19,14 +23,6 @@ moved 14881.6ms off the critical path, TTFT 368ms
 ```
 
 ## How it works
-
-```text
- mic → STT ──► [SpeculativePrefillTap] ──► user aggregator ──► [SpeculativeLLMService] → TTS
-              interim: "what is the"           (turn ends)          │
-                        │  speculative sync                        │ generation-time sync
-                        ▼                                          ▼
-                 KV cache: prompt-so-far ────────────────► cache hit 99% → decode now
-```
 
 1. **Speculative prefill (while the user talks).** The tap feeds every `InterimTranscriptionFrame` / `EagerTranscriptionFrame` / final `TranscriptionFrame` to the service. The service applies the chat template to the live `LLMContext` plus the partial text, tokenizes, and syncs the KV cache to it: keep the longest common prefix with what's already cached, evaluate only the delta.
 2. **Generation (final transcription arrives).** The context frame triggers the final tokenization and sync. In the common case ASR partials only extend, so the final prompt is already ~100% cached and decoding starts immediately. If the final transcript diverged from the last partial (ASR revision), the cache is rewound to the common prefix and only the divergent tail is recomputed.
@@ -90,6 +86,10 @@ warmer = PrefixCacheWarmer(context=context, base_url="http://localhost:8000/v1",
                            model="Qwen/Qwen2.5-0.5B-Instruct", api_key="dummy")
 # pipeline: [stt, warmer, user_aggregator, your_openai_service, ...]
 ```
+
+## Reference implementation
+
+`examples/local_voice_bot.py` is the complete reference implementation of the approach: local Whisper STT → `llm.transcription_tap()` → `SpeculativeLLMService` → Kokoro TTS. Mic in, speech out, zero cloud. `examples/bench_ttft.py` reproduces the TTFT table above on any machine. This repo serves as the reference implementation for the approach proposed upstream in [pipecat#6511](https://github.com/pipecat-ai/pipecat/issues/6511).
 
 ## Backends
 
