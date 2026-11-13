@@ -144,7 +144,9 @@ class TestSpeculativePrefillFlow:
         )
         await _drain_prefill(service)
         assert len(backend.sync_calls) == 1
-        assert service.last_turn_stats.spec_syncs == 1
+        # The sync is counted in the per-generation window; TurnStats takes it
+        # at generation time.
+        assert service._spec_window[0] == 1
 
         await tap.process_frame(
             InterimTranscriptionFrame("hello wor", "", 1), FrameDirection.DOWNSTREAM
@@ -231,3 +233,40 @@ class TestSpeculativePrefillFlow:
         service.note_partial("   ")
         await asyncio.sleep(0.005)
         assert backend.sync_calls == []
+
+    async def test_turn_stats_window_is_per_generation(self):
+        """Every TurnStats field means the last completed generation: a second
+        turn reports only its own speculative syncs, not the running sum."""
+        service, backend, context, pushed = _make_service()
+        tap = service.transcription_tap()
+
+        await tap.process_frame(
+            InterimTranscriptionFrame("hello", "", 0), FrameDirection.DOWNSTREAM
+        )
+        await _drain_prefill(service)
+        context.add_message({"role": "user", "content": "hello"})
+        await service.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
+        assert service.last_turn_stats.spec_syncs == 1
+
+        await tap.process_frame(
+            InterimTranscriptionFrame("hello again", "", 1), FrameDirection.DOWNSTREAM
+        )
+        await _drain_prefill(service)
+        context.add_message({"role": "user", "content": "hello again"})
+        await service.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
+        assert service.last_turn_stats.spec_syncs == 1
+
+    async def test_cleanup_cancels_the_prefill_worker(self):
+        """pipecat's base cleanup does not release create_task tasks; the
+        worker parked on the wake event must not outlive the pipeline."""
+        service, backend, context, pushed = _make_service()
+        tap = service.transcription_tap()
+        await tap.process_frame(
+            InterimTranscriptionFrame("hello", "", 0), FrameDirection.DOWNSTREAM
+        )
+        await _drain_prefill(service)
+        assert service._prefill_task is not None
+        assert not service._prefill_task.done()  # parked on the wake event
+        task = service._prefill_task  # cleanup clears the attribute
+        await service.cleanup()
+        assert task.cancelled()

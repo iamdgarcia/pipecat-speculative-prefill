@@ -108,6 +108,10 @@ class SpeculativeLLMService(LLMService):
         self._generating = False
         self._turn = TurnStats()
         self._warned_tools = False
+        # Speculative syncs since the last generation: [syncs, offloaded_ms].
+        # TurnStats snapshots this window at each generation, so every field
+        # of last_turn_stats means "the last completed generation".
+        self._spec_window = [0, 0.0]
 
     # -- wiring ------------------------------------------------------------
 
@@ -169,8 +173,8 @@ class SpeculativeLLMService(LLMService):
                     start = time.perf_counter()
                     stats = await self._backend.sync(tokens)
                     elapsed_ms = (time.perf_counter() - start) * 1000
-                    self._turn.spec_syncs += 1
-                    self._turn.work_offloaded_ms += elapsed_ms
+                    self._spec_window[0] += 1
+                    self._spec_window[1] += elapsed_ms
                     self._turn.kept, self._turn.total = stats.kept, stats.total
                     logger.debug(
                         f"{self}: speculative prefill +{stats.recomputed} tokens "
@@ -183,6 +187,17 @@ class SpeculativeLLMService(LLMService):
             finally:
                 self._prefill_done += 1
                 self._prefill_busy = False
+
+    async def cleanup(self):
+        """Cancel the prefill worker at teardown.
+
+        pipecat's base cleanup does not release ``create_task`` tasks; without
+        this the worker outlives the pipeline, parked on the wake event.
+        """
+        if self._prefill_task is not None and not self._prefill_task.done():
+            await self.cancel_task(self._prefill_task)
+            self._prefill_task = None
+        await super().cleanup()
 
     # -- generation ---------------------------------------------------------
 
@@ -253,6 +268,12 @@ class SpeculativeLLMService(LLMService):
                         for c in calls
                     ]
                     await self.run_function_calls(function_calls)
+                # TurnStats means the last completed generation: take the
+                # window (speculative syncs served since the previous
+                # generation) and restart it for the next turn.
+                self._turn.spec_syncs = self._spec_window[0]
+                self._turn.work_offloaded_ms = self._spec_window[1]
+                self._spec_window = [0, 0.0]
                 logger.info(
                     f"{self}: spec-prefill hit {self._turn.hit_ratio:.0%} "
                     f"({self._turn.kept}/{self._turn.total} tokens), "

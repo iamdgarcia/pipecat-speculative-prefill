@@ -93,3 +93,13 @@ class TestPrefixCacheWarmer:
         )
         await asyncio.sleep(0.05)
         assert len(requests) == 1  # identical messages already warmed: skipped
+
+    async def test_cleanup_cancels_inflight_warm(self):
+        requests: list[dict] = []
+        warmer, context = _make_warmer(requests)
+        # A warm request parked forever: cleanup must not leave it running.
+        task = warmer.create_task(asyncio.sleep(5))
+        warmer._inflight = task
+
+        await warmer.cleanup()
+        assert task.cancelled()  # cleanup clears _inflight; keep the reference

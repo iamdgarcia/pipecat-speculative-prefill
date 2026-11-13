@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pipecat-speculative-prefill"
-version = "0.1.0"
+version = "0.1.1"
 description = "Speculative KV-cache prefill for pipecat: prefill the LLM while the user is still talking, so generation starts the instant the final transcription arrives."
 readme = "README.md"
 requires-python = ">=3.10"

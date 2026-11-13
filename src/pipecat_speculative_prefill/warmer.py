@@ -83,6 +83,9 @@ class PrefixCacheWarmer(FrameProcessor):
         self._warned_tools = False
 
     async def cleanup(self):
+        if self._inflight is not None and not self._inflight.done():
+            await self.cancel_task(self._inflight)
+            self._inflight = None
         if self._owns_client and self._client is not None:
             await self._client.aclose()
             self._client = None
